@@ -605,7 +605,7 @@ async function extractMetadataTable() {
       let raw;
       if (provider === 'local') {
         const page = await doc.getPage(p);
-        raw = await extractQuestionPaperFieldsLocalFromPage(page);
+        raw = await extractQuestionPaperFieldsLocalFromPage(page, doc);
       } else {
         const b64 = await renderPdfPageToBase64(doc, p, 1.6, 0.8);
         raw = await extractQuestionPaperFields(b64, provider, model, apiKey);
@@ -669,22 +669,54 @@ async function getPageTextLines(page) {
     .filter(Boolean);
 }
 
-async function extractQuestionPaperFieldsLocalFromPage(page) {
-  const lines = await getPageTextLines(page);
-  const text = lines.join(' \n ');
-  const schoolLine = lines.find(l => /(university|college|institute|school|polytechnic|academy)/i.test(l)) || (lines[0] || '');
+async function extractQuestionPaperFieldsLocalFromPage(page, pdfDoc) {
+  let lines = await getPageTextLines(page);
+  let text = lines.join(' \n ');
+  
+  // OCR Fallback if text layer is sparse
+  if (text.trim().length < 50 && pdfDoc) {
+    const pageNum = page.pageNumber;
+    const b64 = await renderPdfPageToBase64(pdfDoc, pageNum, 2.0, 0.9);
+    const ocrResult = await Tesseract.recognize('data:image/jpeg;base64,' + b64, 'eng');
+    text = ocrResult.data.text;
+    lines = text.split('\n');
+    autoLog(`Local OCR performed on page ${pageNum}.`, 'ok');
+  }
+
+  return extractPaperMetadataLocal(text, lines);
+}
+
+function extractPaperMetadataLocal(text, lines) {
+  if (!text) return { is_first_page: false, confidence: 0 };
+  
+  const doc = nlp(text);
+  
+  // Extract Schools/Universities using NLP
+  let school = doc.organizations().filter(o => /university|college|school|institute|academy|polytechnic/i.test(o.text())).first().text();
+  if (!school) {
+    school = lines.find(l => /(university|college|institute|school|polytechnic|academy)/i.test(l)) || (lines[0] || '');
+  }
+
   const deptLines = lines
     .filter(l => /(department|dept\.?|programme|program|faculty|school of)/i.test(l))
     .slice(0, 3)
     .map(l => l.replace(/^(department|dept\.?|faculty|school of)\s*(of)?\s*/i, '').trim())
     .filter(Boolean);
+
   const codeMatch = text.match(/\b[A-Z]{2,}[\s\/-]?[A-Z0-9]{2,}[\s\/-]?\d{1,4}[A-Z0-9]*\b/);
-  const subjectLine = lines.find(l => /(subject|course|paper)\s*[:\-]/i.test(l)) || '';
+  
+  let subjectLine = lines.find(l => /(subject|course|paper)\s*[:\-]/i.test(l)) || '';
+  if (!subjectLine) {
+    // Try to find a line that looks like a title (Title Case, no numbers)
+    const candidates = lines.filter(l => l.length > 10 && l.length < 60 && !/\d/.test(l));
+    subjectLine = candidates[0] || '';
+  }
+
   const monthMatch = text.match(/\b(January|February|March|April|May|June|July|August|September|October|November|December)\b/i);
   const yearMatch = text.match(/\b(19|20)\d{2}\b/);
 
   let score = 0;
-  if (schoolLine) score += 1;
+  if (school && school.length > 5) score += 1;
   if (deptLines.length) score += 1;
   if (codeMatch) score += 1;
   if (subjectLine) score += 1;
@@ -694,7 +726,7 @@ async function extractQuestionPaperFieldsLocalFromPage(page) {
 
   return {
     is_first_page: score >= 3,
-    school: schoolLine,
+    school: school,
     departments: deptLines,
     subject_code: codeMatch ? codeMatch[0] : '',
     subject: subjectLine.replace(/^(subject|course|paper)\s*[:\-]?\s*/i, '').trim(),
@@ -1206,24 +1238,27 @@ function cancelAutomatePipeline() {
 }
 
 async function extractTitleFromPdfBytes(cleanBytes, provider, model, apiKey) {
-  if (provider === 'local') {
-    const doc = await pdfjsLib.getDocument({ data: cleanBytes }).promise;
-    const page = await doc.getPage(1);
-    const lines = await getPageTextLines(page);
-
-    const cleaned = lines
-      .map(l => l.replace(/\s+/g, ' ').trim())
-      .filter(Boolean)
-      .filter(l => l.length >= 8 && l.length <= 140)
-      .filter(l => !/^(page\s*\d+|time\s*[:\-]|max\s*marks|instructions?)$/i.test(l));
-
-    if (!cleaned.length) return '';
-
-    const strong = cleaned.find(l => /(question\s*paper|subject|course|examination|exam)/i.test(l));
-    return (strong || cleaned[0]).slice(0, 140);
+  const doc = await pdfjsLib.getDocument({ data: cleanBytes }).promise;
+  const page = await doc.getPage(1);
+  
+  // Try text layer first
+  let lines = await getPageTextLines(page);
+  let fullText = lines.join(' ');
+  
+  // If text layer is too thin, try OCR
+  if (fullText.trim().length < 50) {
+    const b64 = await renderPdfPageToBase64(doc, 1, 2.0, 0.9);
+    const ocrResult = await Tesseract.recognize('data:image/jpeg;base64,' + b64, 'eng');
+    fullText = ocrResult.data.text;
+    lines = fullText.split('\n');
+    autoLog('Local OCR performed on page 1.', 'ok');
   }
 
-  const doc = await pdfjsLib.getDocument({ data: cleanBytes }).promise;
+  if (provider === 'local') {
+    return extractEntitiesLocal(fullText, lines);
+  }
+
+  // AI Vision Provider fallback
   const b64 = await renderPdfPageToBase64(doc, 1, 1.6, 0.8);
   const prompt = "Extract the best concise title of this question paper. Return ONLY JSON with key 'title'. If unclear, return title as empty string.";
 
@@ -1898,6 +1933,11 @@ async function uploadBytesToDriveSmart(bytes, outputName, folderId, mimeType = '
   });
 
   return res.json();
+}
+
+function extractEntitiesLocal(text, lines) {
+  const meta = extractPaperMetadataLocal(text, lines);
+  return meta.subject || meta.school || lines[0] || '';
 }
 
 // Initialize components
