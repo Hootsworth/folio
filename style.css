@@ -709,6 +709,23 @@ select {
 .meta-status.err { color: var(--accent); }
 .meta-table-wrap {
   border: 1px solid var(--ink-faint);
+  .auto-results {
+    margin-top: 1rem;
+    overflow-x: auto;
+    border-radius: 8px;
+    border: 1px solid rgba(0, 0, 0, 0.05);
+  }
+  .auto-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.68rem;
+    white-space: nowrap;
+  }
+  .auto-table th, .auto-table td {
+    padding: 0.6rem 0.75rem;
+    text-align: left;
+    border-bottom: 1px solid rgba(0, 0, 0, 0.03);
+  }
   overflow: auto;
   background: #fff;
 }

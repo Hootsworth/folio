@@ -1457,6 +1457,7 @@ async function runAutomatePipeline() {
 
     setAutoStepState(2, 'active');
     autoLog(`Step 2/5: Cleaning PDFs using ${cleanProvider}…`);
+    const cleanFilesCache = new Map(); // Store [sourceName -> {bytes, removed, kept}]
 
     for (let i = 0; i < sourceFiles.length; i++) {
       if (automateCancelRequested) throw new Error('Canceled.');
@@ -1465,104 +1466,159 @@ async function runAutomatePipeline() {
       autoLog(`Processing ${i + 1}/${sourceFiles.length}: ${f.name}`);
       const bytes = await downloadDriveFileBytes(f.id);
       const cleaned = await processPdfBytes(f.name, bytes, cleanProvider, cleanModel, apiKey, i, sourceFiles.length);
-
-      const row = {
-        sourceFile: f.name,
-        cleanedFile: cleaned.outputName,
-        totalPages: cleaned.totalPages,
+      
+      cleanFilesCache.set(f.name, {
+        bytes: cleaned.cleanPdfBytes,
         removed: cleaned.removed,
         kept: cleaned.kept,
-        cleanPdfBytes: cleaned.cleanPdfBytes,
-        title: '',
-        excelMatch: 'No Match',
-        excelRow: null,
-        driveFileId: ''
-      };
-      automateResults.push(row);
-      renderAutomateRows();
+        totalPages: cleaned.totalPages
+      });
+      autoLog(`Cleaned ${f.name}.`, 'ok');
     }
     setAutoStepState(2, 'done');
 
     setAutoStepState(3, 'active');
-    autoLog(`Step 3/5: Extracting metadata using ${metaProvider}…`);
-    for (let i = 0; i < automateResults.length; i++) {
+    autoLog(`Step 3/5: Scanning every page for multiple papers using ${metaProvider}…`);
+    const detectedPapers = [];
+
+    for (const [sourceName, cache] of cleanFilesCache.entries()) {
       if (automateCancelRequested) throw new Error('Canceled.');
-      const row = automateResults[i];
-      try {
-        row.title = (await extractTitleFromPdfBytes(row.cleanPdfBytes, metaProvider, metaModel, apiKey)).trim();
-        autoLog(`Metadata: ${row.title || 'Unknown'}`);
-      } catch (err) { autoLog(`Metadata error: ${err.message}`, 'err'); }
-      
-      const matchData = getMappedExcelRow(row.sourceFile, row.title);
-      if (matchData) {
-        row.excelMatch = 'Matched';
-        row.excelRow = matchData.row;
-        autoLog(`Matched ${row.sourceFile} to Excel row.`, 'ok');
+      const doc = await pdfjsLib.getDocument({ data: cache.bytes }).promise;
+      autoLog(`Scanning ${sourceName} (${doc.numPages} pages)…`);
+
+      for (let p = 1; p <= doc.numPages; p++) {
+        const page = await doc.getPage(p);
+        const meta = await extractQuestionPaperFieldsLocalFromPage(page, doc);
+        
+        if (meta.is_first_page || p === 1) {
+          let finalMeta = meta;
+          if (metaProvider !== 'local') {
+            const b64 = await renderPdfPageToBase64(doc, p, 1.6, 0.8);
+            finalMeta = await extractQuestionPaperFields(b64, metaProvider, metaModel, apiKey);
+          }
+
+          const paper = {
+            sourceFile: sourceName,
+            pageIndex: p,
+            school: finalMeta.school || meta.school || '',
+            dept: (finalMeta.departments || meta.departments || []).join(', '),
+            subjectCode: finalMeta.subject_code || meta.subject_code || '',
+            subject: finalMeta.subject || meta.subject || '',
+            month: finalMeta.month || meta.month || '',
+            year: finalMeta.year || meta.year || '',
+            excelMatch: 'No Match',
+            excelRow: null,
+            driveFileId: ''
+          };
+
+          const matchData = getMappedExcelRow(sourceName, paper.subject || paper.subjectCode);
+          if (matchData) {
+            paper.excelMatch = 'Matched';
+            paper.excelRow = matchData.row;
+          }
+
+          detectedPapers.push(paper);
+          renderAutomateRowsFlattened(detectedPapers);
+        }
       }
-      renderAutomateRows();
     }
+    automateResults = detectedPapers;
     setAutoStepState(3, 'done');
 
     setAutoStepState(4, 'active');
     autoLog('Step 4/5: Building folders and uploading…');
-    for (let i = 0; i < automateResults.length; i++) {
+    
+    // Group detected papers by source file for efficient uploading
+    const papersByFile = new Map();
+    automateResults.forEach(p => {
+      if (!papersByFile.has(p.sourceFile)) papersByFile.set(p.sourceFile, []);
+      papersByFile.get(p.sourceFile).push(p);
+    });
+
+    for (const [sourceName, papers] of papersByFile.entries()) {
       if (automateCancelRequested) throw new Error('Canceled.');
-      const row = automateResults[i];
+      
+      const cache = cleanFilesCache.get(sourceName);
       let targetFolderId = destinationFolderId;
       
-      if (useFolderLogic && row.excelRow) {
-        const year = String(row.excelRow[document.getElementById('map-year').value] || 'Unknown-Year');
-        const dept = String(row.excelRow[document.getElementById('map-dept').value] || 'Unknown-Dept');
-        const code = String(row.excelRow[document.getElementById('map-code').value] || 'Unknown-Subject');
+      // If folder logic is ON, we use the first paper's metadata for the folder
+      // (Usually a bundle belongs to one dept/year)
+      const p1 = papers[0];
+      if (useFolderLogic) {
+        const year = p1.year || 'Unknown-Year';
+        const dept = p1.dept || 'Unknown-Dept';
+        const code = p1.subjectCode || 'Unknown-Code';
         
         const yearId = await getOrCreateSubfolder(destinationFolderId, year);
         const deptId = await getOrCreateSubfolder(yearId, dept);
         targetFolderId = await getOrCreateSubfolder(deptId, code);
-        
-        // Standardize filename
-        const cleanTitle = (row.title || row.sourceFile).replace(/[^a-zA-Z0-9]/g, '_').slice(0, 50);
-        row.cleanedFile = `${code}_${year}_${cleanTitle}.pdf`;
       }
 
-      autoLog(`Uploading ${row.cleanedFile}…`);
-      const up = await uploadBytesToDriveSmart(row.cleanPdfBytes, row.cleanedFile, targetFolderId);
-      row.driveFileId = up.id;
-      renderAutomateRows();
+      const outputName = `${sourceName.replace(/\.pdf$/i, '')}_cleaned.pdf`;
+      autoLog(`Uploading ${outputName}…`);
+      const up = await uploadBytesToDriveSmart(cache.bytes, outputName, targetFolderId);
+      
+      // Update all papers from this source with the same file ID
+      papers.forEach(p => p.driveFileId = up.id);
+      renderAutomateRowsFlattened(automateResults);
     }
     setAutoStepState(4, 'done');
 
     setAutoStepState(5, 'active');
-    autoLog('Step 5/5: Generating Audit Report…');
-    automateCsvText = buildAuditReport();
+    autoLog('Step 5/5: Generating Comprehensive Audit Report…');
+    automateCsvText = buildAuditReportExtended();
     const csvBlob = new Blob([automateCsvText], { type: 'text/csv' });
     const csvBytes = new Uint8Array(await csvBlob.arrayBuffer());
     await uploadBytesToDriveSmart(csvBytes, `audit_report_${new Date().getTime()}.csv`, destinationFolderId, 'text/csv');
     setAutoStepState(5, 'done');
 
     setAutoStatus('Automation complete.', 'ok');
-    autoLog('Pipeline complete. Audit report uploaded.', 'ok');
+    autoLog('Pipeline complete. All detected papers logged.', 'ok');
   } catch (err) {
     autoLog(`Failed: ${err.message}`, 'err');
     setAutoStatus(`Failed: ${err.message}`, 'err');
   } finally { automateRunning = false; }
 }
 
-function buildAuditReport() {
-  const titleCol = document.getElementById('map-title').value;
-  const header = 'source_file,cleaned_file,pages_removed,pages_kept,detected_title,excel_match,excel_row_data,drive_file_id';
-  const rows = automateResults.map(r => {
-    const excelJson = r.excelRow ? JSON.stringify(r.excelRow).replace(/"/g, '""') : '';
-    return [
-      r.sourceFile,
-      r.cleanedFile,
-      r.removed,
-      r.kept,
-      r.title || '',
-      r.excelMatch,
-      `"${excelJson}"`,
-      r.driveFileId
-    ].map(v => `"${String(v).replace(/"/g, '""')}"`).join(',');
+function renderAutomateRowsFlattened(papers) {
+  const body = document.getElementById('auto-table-body');
+  if (!body) return;
+  body.innerHTML = '';
+  if (!papers.length) {
+    body.innerHTML = '<tr><td colspan="9" class="meta-empty">No papers detected yet.</td></tr>';
+    return;
+  }
+  papers.forEach(p => {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td>${p.sourceFile} (p.${p.pageIndex})</td>
+      <td><span class="match-badge ${p.excelMatch.toLowerCase().replace(' ', '-')}">${p.excelMatch}</span></td>
+      <td>${p.subjectCode || '—'}</td>
+      <td>${p.subject || '—'}</td>
+      <td>${p.school || '—'}</td>
+      <td>${p.dept || '—'}</td>
+      <td>${p.month || '—'}</td>
+      <td>${p.year || '—'}</td>
+      <td><a href="https://drive.google.com/file/d/${p.driveFileId}/view" target="_blank">View</a></td>
+    `;
+    body.appendChild(tr);
   });
+}
+
+function buildAuditReportExtended() {
+  const header = 'source_file,start_page,school,department,subject_code,subject,month,year,excel_match,drive_file_id';
+  const rows = automateResults.map(p => [
+    p.sourceFile,
+    p.pageIndex,
+    p.school,
+    p.dept,
+    p.subjectCode,
+    p.subject,
+    p.month,
+    p.year,
+    p.excelMatch,
+    p.driveFileId
+  ].map(v => `"${String(v || '').replace(/"/g, '""')}"`).join(','));
   return [header, ...rows].join('\n');
 }
 
