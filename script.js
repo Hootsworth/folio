@@ -465,6 +465,7 @@ function normalizeMetadata(obj, sourceFile) {
   return {
     school: String(obj.school || '').trim(),
     departments,
+    semester: String(obj.semester || '').trim(),
     subjectCode: String(obj.subject_code || obj.subjectCode || '').trim(),
     subject: String(obj.subject || '').trim(),
     month: String(obj.month || '').trim(),
@@ -476,7 +477,7 @@ function normalizeMetadata(obj, sourceFile) {
 }
 
 async function extractQuestionPaperFields(b64, provider, model, apiKey) {
-  const prompt = "Decide if this page is the FIRST PAGE of a question paper/exam paper. Indicators include school/institute name, department/program, subject code, subject name, exam month/year, instructions, time, max marks. Return ONLY JSON with keys: is_first_page (boolean), school, departments (array of strings), subject_code, subject, month, year, confidence (number 0-1). If not first page, return is_first_page false and empty fields.";
+  const prompt = "Decide if this page is the FIRST PAGE of a question paper/exam paper. Indicators include school/institute name, department/program, subject code, subject name, exam month/year, semester, instructions, time, max marks. Return ONLY JSON with keys: is_first_page (boolean), school, departments (array of strings), semester, subject_code, subject, month, year, confidence (number 0-1). If not first page, return is_first_page false and empty fields.";
 
   async function openAiCompatibleMeta(endpoint, authHeader, tokenField, maxTokens) {
     const body = {
@@ -737,6 +738,9 @@ function extractPaperMetadataLocal(text, lines) {
   if (yearMatch) score += 1;
   if (/\b(time|max\s*marks|duration|instructions?)\b/i.test(text)) score += 1;
 
+  const semesterMatch = text.match(/Sem(?:ester)?\s*[:\-]?\s*([I|V|X|0-9]+|[A-Za-z]+)/i);
+  const semester = semesterMatch ? semesterMatch[1] : '';
+
   return {
     is_first_page: score >= 3,
     school: school,
@@ -745,6 +749,7 @@ function extractPaperMetadataLocal(text, lines) {
     subject: subjectLine.replace(/^(subject|course|paper)\s*[:\-]?\s*/i, '').trim(),
     month: monthMatch ? monthMatch[0] : '',
     year: yearMatch ? yearMatch[0] : '',
+    semester: semester,
     confidence: Math.min(1, score / 7)
   };
 }
@@ -1504,7 +1509,7 @@ async function runAutomatePipeline() {
         detectedPapers.push({
           sourceFile: sourceName,
           pageIndex: 1,
-          school: '', dept: '', subjectCode: '', subject: 'Extraction Skipped',
+          school: '', semester: '', dept: '', subjectCode: '', subject: 'Extraction Skipped',
           month: '', year: '', excelMatch: 'No Match', excelRow: null, driveFileId: ''
         });
       }
@@ -1539,6 +1544,7 @@ async function runAutomatePipeline() {
               sourceFile: sourceName,
               pageIndex: p,
               school: finalMeta.school || meta.school || '',
+              semester: finalMeta.semester || meta.semester || '',
               dept: (finalMeta.departments || meta.departments || []).join(', '),
               subjectCode: finalMeta.subject_code || meta.subject_code || '',
               subject: finalMeta.subject || meta.subject || '',
@@ -1609,15 +1615,14 @@ async function runAutomatePipeline() {
     setAutoStepState(4, 'done');
 
     setAutoStepState(5, 'active');
-    autoLog('Step 5/5: Generating Comprehensive Audit Report…');
-    automateCsvText = buildAuditReportExtended();
-    const csvBlob = new Blob([automateCsvText], { type: 'text/csv' });
-    const csvBytes = new Uint8Array(await csvBlob.arrayBuffer());
-    await uploadBytesToDriveSmart(csvBytes, `audit_report_${new Date().getTime()}.csv`, destinationFolderId, 'text/csv');
+    autoLog('Step 5/5: Generating Multi-Sheet Excel Report…');
+    const excelBlob = generateExcelReport();
+    const excelBytes = new Uint8Array(await excelBlob.arrayBuffer());
+    await uploadBytesToDriveSmart(excelBytes, `folio_report_${new Date().getTime()}.xlsx`, destinationFolderId, 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
     setAutoStepState(5, 'done');
 
     setAutoStatus('Automation complete.', 'ok');
-    autoLog('Pipeline complete. All detected papers logged.', 'ok');
+    autoLog('Pipeline complete. Excel report uploaded.', 'ok');
   } catch (err) {
     autoLog(`Failed: ${err.message}`, 'err');
     setAutoStatus(`Failed: ${err.message}`, 'err');
@@ -1629,7 +1634,7 @@ function renderAutomateRowsFlattened(papers) {
   if (!body) return;
   body.innerHTML = '';
   if (!papers.length) {
-    body.innerHTML = '<tr><td colspan="9" class="meta-empty">No papers detected yet.</td></tr>';
+    body.innerHTML = '<tr><td colspan="10" class="meta-empty">No papers detected yet.</td></tr>';
     return;
   }
   papers.forEach(p => {
@@ -1637,6 +1642,7 @@ function renderAutomateRowsFlattened(papers) {
     tr.innerHTML = `
       <td>${p.sourceFile} (p.${p.pageIndex})</td>
       <td><span class="match-badge ${p.excelMatch.toLowerCase().replace(' ', '-')}">${p.excelMatch}</span></td>
+      <td>${p.semester || '—'}</td>
       <td>${p.subjectCode || '—'}</td>
       <td>${p.subject || '—'}</td>
       <td>${p.school || '—'}</td>
@@ -1649,21 +1655,47 @@ function renderAutomateRowsFlattened(papers) {
   });
 }
 
-function buildAuditReportExtended() {
-  const header = 'source_file,start_page,school,department,subject_code,subject,month,year,excel_match,drive_file_id';
-  const rows = automateResults.map(p => [
-    p.sourceFile,
-    p.pageIndex,
-    p.school,
-    p.dept,
-    p.subjectCode,
-    p.subject,
-    p.month,
-    p.year,
-    p.excelMatch,
-    p.driveFileId
-  ].map(v => `"${String(v || '').replace(/"/g, '""')}"`).join(','));
-  return [header, ...rows].join('\n');
+function generateExcelReport() {
+  const wb = XLSX.utils.book_new();
+  
+  // Group papers by school
+  const papersBySchool = new Map();
+  automateResults.forEach(p => {
+    const s = p.school || 'Unspecified School';
+    if (!papersBySchool.has(s)) papersBySchool.set(s, []);
+    papersBySchool.get(s).push(p);
+  });
+
+  for (const [schoolName, papers] of papersBySchool.entries()) {
+    const data = papers.map(p => ({
+      'School': p.school,
+      'Semester': p.semester,
+      'Dept': p.dept,
+      'Course Code': p.subjectCode,
+      'Course Title': p.subject,
+      'Month': p.month,
+      'Year': p.year
+    }));
+
+    const ws = XLSX.utils.json_to_sheet(data);
+    
+    // Sheet names limited to 31 chars
+    const safeName = schoolName.replace(/[\\/?*\[\]]/g, '').slice(0, 31) || 'Sheet';
+    XLSX.utils.book_append_sheet(wb, ws, safeName);
+  }
+
+  const wbout = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
+  return new Blob([wbout], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+}
+
+function downloadAutomateExcel() {
+  const blob = generateExcelReport();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `folio_report_${new Date().getTime()}.xlsx`;
+  a.click();
+  URL.revokeObjectURL(url);
 }
 
 async function uploadBytesToDrive(bytes, outputName, mimeType = 'application/pdf') {
