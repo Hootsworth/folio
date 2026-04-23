@@ -1,0 +1,370 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Folio — AI PDF Cleaner</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400;0,500;1,400&family=DM+Mono:wght@300;400&family=Instrument+Sans:wght@400;500&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js"></script>
+<script src="https://accounts.google.com/gsi/client" async defer></script>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header>
+  <a class="logo" href="#"><em>Folio</em> — PDF Cleaner</a>
+  <span class="header-tag">AI-powered blank page removal</span>
+</header>
+
+<section class="hero">
+  <div>
+    <p class="hero-label">Document Intelligence</p>
+    <h1>Remove <em>empty pages</em><br>from scanned PDFs</h1>
+    <p class="hero-sub">Upload a scanned document. An AI vision model examines every page — handling scan noise, dust, faint artifacts — and rebuilds a clean PDF with only the pages that matter.</p>
+  </div>
+  <div class="hero-aside">
+    <div class="aside-stat">
+      <div class="aside-stat-num">3</div>
+      <div class="aside-stat-label">AI Providers</div>
+    </div>
+    <div class="aside-stat">
+      <div class="aside-stat-num">100%</div>
+      <div class="aside-stat-label">Client-side processing</div>
+    </div>
+    <div class="aside-stat">
+      <div class="aside-stat-num">∞</div>
+      <div class="aside-stat-label">Pages supported</div>
+    </div>
+  </div>
+</section>
+
+<div class="view-nav">
+  <button class="view-btn active" id="view-manual-btn" type="button" onclick="switchView('manual')">Manual Flow</button>
+  <button class="view-btn" id="view-automate-btn" type="button" onclick="switchView('automate')">Automate (Drive to Drive)</button>
+</div>
+
+<div id="manual-view" class="page-view active">
+
+<div class="rule"></div>
+
+<main>
+  <div>
+    <div class="section-label"><span>01 — Upload</span></div>
+
+    <div id="drop-zone"
+      onclick="document.getElementById('file-input').click()"
+      ondragover="event.preventDefault(); this.classList.add('drag-over')"
+      ondragleave="this.classList.remove('drag-over')"
+      ondrop="handleDrop(event)">
+      <div class="drop-icon">PDF</div>
+      <div class="drop-title">Drop your documents here</div>
+      <div class="drop-sub">or click to browse · multiple .pdf files supported</div>
+      <input type="file" id="file-input" accept=".pdf" multiple onchange="handleFile(this.files)">
+    </div>
+
+    <div id="file-info">
+      <div class="file-icon">📋</div>
+      <div class="file-meta">
+        <div class="file-name" id="file-name-display"></div>
+        <div class="file-size" id="file-size-display"></div>
+        <ul class="file-list" id="file-list"></ul>
+      </div>
+      <button class="btn-ghost" onclick="resetAll()">Remove</button>
+    </div>
+
+    <div class="section-label" style="margin-top:1.5rem"><span>02 — Configure</span></div>
+
+    <div class="field">
+      <label class="field-label">Engine &amp; Model</label>
+      <div class="field-row">
+        <select id="provider-select" onchange="onProviderChange()">
+          <option value="anthropic">Anthropic</option>
+          <option value="openai">OpenAI</option>
+          <option value="openrouter">OpenRouter</option>
+          <option value="groq">Groq</option>
+          <option value="gemini">Google Gemini</option>
+          <option value="local">Local Non-AI</option>
+        </select>
+        <select id="model-select"></select>
+      </div>
+    </div>
+
+    <div class="field">
+      <label class="field-label">API Key (not required for Local mode)</label>
+      <div class="api-key-row">
+        <input type="password" id="api-key" placeholder="sk-ant-..." autocomplete="off" spellcheck="false">
+        <button class="toggle-vis" onclick="toggleKeyVis()">Show</button>
+      </div>
+    </div>
+
+    <div class="field">
+      <label class="field-label">Detection Sensitivity</label>
+      <div class="sens-track">
+        <button class="sens-btn" data-v="1" onclick="setSens(1)">Conservative</button>
+        <button class="sens-btn active" data-v="2" onclick="setSens(2)">Balanced</button>
+        <button class="sens-btn" data-v="3" onclick="setSens(3)">Aggressive</button>
+      </div>
+    </div>
+
+    <div class="field">
+      <label class="field-label">Google Drive Auto Upload</label>
+      <div class="field-row" style="margin-bottom:0.5rem;">
+        <input type="text" id="google-client-id" placeholder="Google OAuth Client ID">
+        <button class="btn-secondary" type="button" onclick="connectGoogleAccount()">Connect Google</button>
+      </div>
+      <div class="field-row" style="margin-bottom:0.5rem;">
+        <input type="text" id="drive-folder-id" placeholder="Drive folder ID (or create below)" onchange="syncDriveFolderId()">
+        <button class="btn-secondary" type="button" onclick="createDriveFolder()">Create Folder</button>
+      </div>
+      <div class="toggle-row">
+        <input type="checkbox" id="auto-upload-toggle">
+        <label for="auto-upload-toggle">Auto-upload every cleaned PDF to selected folder</label>
+      </div>
+      <div class="note-mini">Folder creation uses your Google account directly from the browser. No intermediate server is used.</div>
+      <div class="drive-status" id="drive-auth-status"></div>
+    </div>
+
+    <div id="error-box"></div>
+
+    <button id="run-btn" disabled onclick="runAgent()">Analyze &amp; clean document →</button>
+    <button id="cancel-btn" class="btn-secondary" type="button" style="display:none; width:100%; margin-top:0.55rem;" onclick="cancelProcessing()">Cancel current run</button>
+    <button class="btn-ghost" type="button" style="width:100%; margin-top:0.55rem; text-align:center; padding: 0.6rem 0;" onclick="openMetadataStage(false)">Go to question-paper table</button>
+
+    <!-- PROGRESS -->
+    <div id="progress-section">
+      <div class="section-label" style="margin-top:2.5rem">
+        <span>Processing</span>
+        <span id="progress-count"></span>
+      </div>
+      <div class="progress-header">
+        <span class="progress-label" id="progress-label">Initializing…</span>
+      </div>
+      <div class="progress-rail">
+        <div class="progress-fill" id="progress-fill"></div>
+      </div>
+      <div class="page-chips" id="page-chips"></div>
+    </div>
+
+    <!-- RESULTS -->
+    <div id="result-section">
+      <div class="section-label" style="margin-top:2.5rem"><span>03 — Result</span></div>
+
+      <div class="stats-row">
+        <div class="stat-cell">
+          <div class="stat-num" id="stat-total">—</div>
+          <div class="stat-lbl">Total pages</div>
+        </div>
+        <div class="stat-cell">
+          <div class="stat-num removed" id="stat-removed">—</div>
+          <div class="stat-lbl">Removed</div>
+        </div>
+        <div class="stat-cell">
+          <div class="stat-num kept" id="stat-kept">—</div>
+          <div class="stat-lbl">Kept</div>
+        </div>
+        <div class="stat-cell">
+          <div class="stat-num" id="stat-credits">—</div>
+          <div class="stat-lbl">Credits used</div>
+        </div>
+      </div>
+
+      <div class="field">
+        <label class="field-label">Output filename</label>
+        <div class="output-name-wrapper">
+          <input type="text" id="output-name" placeholder="cleaned-document">
+          <span class="output-ext">.pdf</span>
+        </div>
+      </div>
+
+      <div class="action-row">
+        <button class="btn-primary" onclick="downloadPDF()">Download Latest</button>
+        <button class="btn-secondary" onclick="downloadAllPDFs()">Download All</button>
+      </div>
+      <button class="btn-secondary" onclick="downloadProcessingReport()" style="width:100%; margin-bottom:0.5rem;">Download processing report (CSV)</button>
+      <button class="btn-secondary" onclick="uploadLatestToDrive()" style="width:100%; margin-bottom:0.5rem;">Upload latest to Google Drive now</button>
+      <button class="btn-secondary" onclick="openMetadataStage(true)" style="width:100%; margin-bottom:0.5rem;">Continue to question-paper table →</button>
+      <div class="drive-status" id="drive-status"></div>
+
+      <div class="result-list" id="result-list"></div>
+
+      <button class="btn-ghost" onclick="resetAll()" style="width:100%; margin-top:1.5rem; text-align:center; padding: 0.6rem 0;">Process another document</button>
+    </div>
+  </div>
+
+  <!-- SIDEBAR -->
+  <aside class="sidebar">
+    <div class="section-label"><span>How it works</span></div>
+
+    <div class="sidebar-block">
+      <div class="sidebar-title">1. Vision analysis</div>
+      <div class="sidebar-body">Each page is rendered to an image. You can use either AI vision providers or a local non-AI detector that combines text-layer checks with adaptive pixel-density and connected-component analysis for strong blank-page detection.</div>
+    </div>
+
+    <div class="sidebar-block">
+      <div class="sidebar-title">2. Sensitivity modes</div>
+      <div class="sidebar-body">
+        <strong>Conservative</strong> — only truly blank pages with nothing at all.<br><br>
+        <strong>Balanced</strong> — blank + scan noise, dust, edge smears, faint artifacts.<br><br>
+        <strong>Aggressive</strong> — also removes near-empty pages: lone page numbers, stray headers, light watermarks.
+      </div>
+    </div>
+
+    <div class="sidebar-block">
+      <div class="sidebar-title">3. Supported providers</div>
+      <div class="sidebar-body">
+        Your API key goes directly to the provider. It is never stored, logged, or sent elsewhere.
+        <br><br>
+        <span class="provider-pill">Anthropic Claude</span>
+        <span class="provider-pill">OpenAI GPT-4o</span>
+        <span class="provider-pill">OpenRouter</span>
+        <span class="provider-pill">Groq</span>
+        <span class="provider-pill">Google Gemini</span>
+        <span class="provider-pill">Local Non-AI</span>
+      </div>
+    </div>
+
+    <div class="sidebar-block">
+      <div class="sidebar-title">Privacy</div>
+      <div class="sidebar-body">Your PDF is processed entirely in-browser using PDF.js and pdf-lib. Page images are sent to your chosen AI provider's API. No file ever touches an intermediary server.</div>
+    </div>
+  </aside>
+</main>
+
+</div>
+
+<section id="automate-view" class="page-view">
+  <div class="rule"></div>
+  <div class="automate-wrap">
+    <div class="auto-card">
+      <div class="section-label"><span>Automate Setup</span></div>
+      <div class="auto-title">One click, full pipeline</div>
+      <div class="auto-sub">Connect Google, pick source and destination folders, then run a sequential pipeline that cleans pages, extracts titles, builds CSV, and uploads outputs automatically.</div>
+
+      <div class="auto-form">
+        <div class="auto-grid-2">
+          <input type="text" id="auto-google-client-id" placeholder="Google OAuth Client ID">
+          <button class="btn-secondary" type="button" onclick="connectGoogleAccountAuto()">Connect Google</button>
+        </div>
+        <div class="auto-grid-2">
+          <input type="text" id="auto-source-folder-id" placeholder="Source Drive folder ID (input PDFs)">
+          <button class="btn-secondary" type="button" onclick="previewSourceFolder()">Preview source</button>
+        </div>
+        <div class="auto-grid-2">
+          <input type="text" id="auto-destination-folder-id" placeholder="Destination Drive folder ID (outputs)">
+          <button class="btn-secondary" type="button" onclick="createAutoDestinationFolder()">Create destination</button>
+        </div>
+      </div>
+
+      <div class="field" style="margin-bottom: 0.75rem;">
+        <label class="field-label">Engine &amp; Model</label>
+        <div class="field-row">
+          <select id="auto-provider-select" onchange="onAutoProviderChange()"></select>
+          <select id="auto-model-select"></select>
+        </div>
+      </div>
+
+      <div class="field" style="margin-bottom: 0.75rem;">
+        <label class="field-label">API Key (not required for Local mode)</label>
+        <input type="password" id="auto-api-key" placeholder="sk-..." autocomplete="off" spellcheck="false">
+      </div>
+
+      <div class="drive-status" id="auto-drive-status"></div>
+
+      <button class="btn-primary" style="width:100%;" type="button" id="auto-run-btn" onclick="runAutomatePipeline()">Automate now</button>
+      <button class="btn-secondary" style="width:100%; margin-top:0.5rem;" type="button" id="auto-cancel-btn" onclick="cancelAutomatePipeline()">Cancel</button>
+
+      <div class="section-label" style="margin-top:1rem"><span>Pipeline Steps</span></div>
+      <ul class="auto-steps" id="auto-steps-list">
+        <li id="auto-step-1">1. Read PDFs from source folder</li>
+        <li id="auto-step-2">2. Remove empty pages in each PDF</li>
+        <li id="auto-step-3">3. Extract title from cleaned papers</li>
+        <li id="auto-step-4">4. Build downloadable CSV table</li>
+        <li id="auto-step-5">5. Upload cleaned PDFs + CSV to destination folder</li>
+      </ul>
+    </div>
+
+    <div class="auto-card">
+      <div class="section-label"><span>Live Run Log</span></div>
+      <div class="auto-log" id="auto-log"></div>
+
+      <div class="section-label" style="margin-top:1rem"><span>Output Table</span></div>
+      <div class="auto-results">
+        <table class="auto-table">
+          <thead>
+            <tr>
+              <th>Source file</th>
+              <th>Cleaned file</th>
+              <th>Detected title</th>
+              <th>Total</th>
+              <th>Removed</th>
+              <th>Kept</th>
+            </tr>
+          </thead>
+          <tbody id="auto-table-body">
+            <tr><td colspan="6" class="meta-empty">Run automation to populate this table.</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="auto-actions">
+        <button class="btn-secondary" type="button" onclick="downloadAutomateCsv()">Download CSV</button>
+        <button class="btn-secondary" type="button" onclick="downloadAllAutomatePdfs()">Download all cleaned PDFs</button>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="metadata-stage">
+  <div class="section-label"><span>04 — Question Paper Table</span></div>
+  <div class="meta-shell">
+    <div class="meta-panel">
+      <div class="meta-title">Paper Metadata Studio</div>
+      <div class="meta-sub">Extract structured fields from the first page of each question paper and build a clean table.</div>
+
+      <div class="meta-stack">
+        <button class="btn-secondary" type="button" onclick="openMetadataStage(true)">Use cleaned PDFs from step 03</button>
+        <button class="btn-secondary" type="button" onclick="document.getElementById('metadata-file-input').click()">Upload question papers</button>
+        <input type="file" id="metadata-file-input" accept=".pdf" multiple style="display:none" onchange="handleMetadataUpload(this.files)">
+        <button class="btn-primary" type="button" onclick="extractMetadataTable()">Read first pages &amp; build table</button>
+        <button class="btn-secondary" type="button" onclick="downloadMetadataCsv()">Download table CSV</button>
+      </div>
+
+      <div class="meta-papers" id="meta-papers"></div>
+    </div>
+
+    <div class="meta-main">
+      <div class="meta-toolbar">
+        <div class="meta-status" id="meta-status">No papers selected yet.</div>
+      </div>
+      <div class="meta-table-wrap">
+        <table class="meta-table" id="meta-table">
+          <thead>
+            <tr>
+              <th>School</th>
+              <th>Department(s)</th>
+              <th>Subject code</th>
+              <th>Subject</th>
+              <th>Month</th>
+              <th>Year</th>
+              <th>Source file</th>
+            </tr>
+          </thead>
+          <tbody id="meta-table-body">
+            <tr><td colspan="7" class="meta-empty">Run extraction to populate this table.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <span class="footer-note">Folio — AI PDF Cleaner · All processing is client-side</span>
+  <span class="footer-note">Keys are never stored or shared</span>
+</footer>
+
+<script src="script.js"></script>
+</body>
+</html>
