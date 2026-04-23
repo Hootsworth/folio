@@ -902,15 +902,33 @@ main { animation: fadeUp 0.5s 0.08s ease both; }
   line-height: 1.4;
 }
 
-.auto-phases {
-  display: flex;
-  flex-direction: column;
-  gap: 0.5rem;
-  background: rgba(0, 0, 0, 0.02);
-  padding: 1rem;
-  border-radius: 8px;
-  margin-bottom: 1.25rem;
-}
+  .auto-phases {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    background: rgba(0, 0, 0, 0.02);
+    padding: 1rem;
+    border-radius: 8px;
+    margin-bottom: 1.25rem;
+  }
+  .field-row-spread {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 0.5rem;
+  }
+  .toggle-row-mini {
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+    font-size: 0.65rem;
+    color: #666;
+  }
+  .toggle-row-mini input {
+    margin: 0;
+    width: 0.8rem;
+    height: 0.8rem;
+  }
 
 .auto-log {
   background: #000;

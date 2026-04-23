@@ -294,7 +294,13 @@
 
       <div class="auto-phases">
         <div class="field" style="margin-bottom: 1.25rem;">
-          <div class="field-label" style="margin-bottom: 0.5rem; color: var(--accent); font-weight: 500;">Phase 1: Page Cleaning (Vision)</div>
+          <div class="field-row-spread">
+            <div class="field-label" style="color: var(--accent); font-weight: 500;">Phase 1: Page Cleaning (Vision)</div>
+            <div class="toggle-row-mini">
+              <input type="checkbox" id="auto-skip-clean">
+              <label for="auto-skip-clean">Skip Cleaning</label>
+            </div>
+          </div>
           <div class="field-row">
             <select id="auto-clean-provider" onchange="onAutoProviderChange('clean')">
               <option value="local">Local (Heuristic - Free)</option>
@@ -309,7 +315,13 @@
         </div>
 
         <div class="field" style="margin-bottom: 1.25rem;">
-          <div class="field-label" style="margin-bottom: 0.5rem; color: var(--accent); font-weight: 500;">Phase 2: Metadata Extraction (Intelligence)</div>
+          <div class="field-row-spread">
+            <div class="field-label" style="color: var(--accent); font-weight: 500;">Phase 2: Metadata Extraction (Intelligence)</div>
+            <div class="toggle-row-mini">
+              <input type="checkbox" id="auto-skip-meta">
+              <label for="auto-skip-meta">Skip Extraction</label>
+            </div>
+          </div>
           <div class="field-row">
             <select id="auto-meta-provider" onchange="onAutoProviderChange('meta')">
               <option value="local" selected>Local (NLP + OCR - Free)</option>

@@ -1431,11 +1431,13 @@ async function runAutomatePipeline() {
   
   const apiKey = document.getElementById('auto-api-key').value.trim();
   const useFolderLogic = document.getElementById('auto-folder-logic').checked;
+  const skipClean = document.getElementById('auto-skip-clean').checked;
+  const skipMeta = document.getElementById('auto-skip-meta').checked;
 
   if (!sourceFolderId) return setAutoStatus('Provide source folder ID.', 'err');
   if (!destinationFolderId) return setAutoStatus('Provide destination folder ID.', 'err');
   
-  const needsKey = (cleanProvider !== 'local' || metaProvider !== 'local');
+  const needsKey = (!skipClean && cleanProvider !== 'local') || (!skipMeta && metaProvider !== 'local');
   if (needsKey && !apiKey) return setAutoStatus('Provide API key for LLM phases.', 'err');
 
   automateRunning = true;
@@ -1456,74 +1458,101 @@ async function runAutomatePipeline() {
     setAutoStepState(1, 'done');
 
     setAutoStepState(2, 'active');
-    autoLog(`Step 2/5: Cleaning PDFs using ${cleanProvider}…`);
     const cleanFilesCache = new Map(); // Store [sourceName -> {bytes, removed, kept}]
 
-    for (let i = 0; i < sourceFiles.length; i++) {
-      if (automateCancelRequested) throw new Error('Canceled.');
-
-      const f = sourceFiles[i];
-      autoLog(`Processing ${i + 1}/${sourceFiles.length}: ${f.name}`);
-      const bytes = await downloadDriveFileBytes(f.id);
-      const cleaned = await processPdfBytes(f.name, bytes, cleanProvider, cleanModel, apiKey, i, sourceFiles.length);
-      
-      cleanFilesCache.set(f.name, {
-        bytes: cleaned.cleanPdfBytes,
-        removed: cleaned.removed,
-        kept: cleaned.kept,
-        totalPages: cleaned.totalPages
-      });
-      autoLog(`Cleaned ${f.name}.`, 'ok');
+    if (skipClean) {
+      autoLog('Step 2/5: Skipping Cleaning (Phase 1) as requested.');
+      for (let i = 0; i < sourceFiles.length; i++) {
+        const f = sourceFiles[i];
+        const bytes = await downloadDriveFileBytes(f.id);
+        cleanFilesCache.set(f.name, {
+          bytes: bytes,
+          removed: 0,
+          kept: 'All (Skipped Cleaning)',
+          totalPages: '?'
+        });
+      }
+      setAutoStepState(2, 'done');
+    } else {
+      autoLog(`Step 2/5: Cleaning PDFs using ${cleanProvider}…`);
+      for (let i = 0; i < sourceFiles.length; i++) {
+        if (automateCancelRequested) throw new Error('Canceled.');
+        const f = sourceFiles[i];
+        autoLog(`Processing ${i + 1}/${sourceFiles.length}: ${f.name}`);
+        const bytes = await downloadDriveFileBytes(f.id);
+        const cleaned = await processPdfBytes(f.name, bytes, cleanProvider, cleanModel, apiKey, i, sourceFiles.length);
+        cleanFilesCache.set(f.name, {
+          bytes: cleaned.cleanPdfBytes,
+          removed: cleaned.removed,
+          kept: cleaned.kept,
+          totalPages: cleaned.totalPages
+        });
+        autoLog(`Cleaned ${f.name}.`, 'ok');
+      }
+      setAutoStepState(2, 'done');
     }
-    setAutoStepState(2, 'done');
 
     setAutoStepState(3, 'active');
-    autoLog(`Step 3/5: Scanning every page for multiple papers using ${metaProvider}…`);
     const detectedPapers = [];
 
-    for (const [sourceName, cache] of cleanFilesCache.entries()) {
-      if (automateCancelRequested) throw new Error('Canceled.');
-      const doc = await pdfjsLib.getDocument({ data: cache.bytes }).promise;
-      autoLog(`Scanning ${sourceName} (${doc.numPages} pages)…`);
+    if (skipMeta) {
+      autoLog('Step 3/5: Skipping Metadata Extraction (Phase 2) as requested.');
+      for (const sourceName of cleanFilesCache.keys()) {
+        detectedPapers.push({
+          sourceFile: sourceName,
+          pageIndex: 1,
+          school: '', dept: '', subjectCode: '', subject: 'Extraction Skipped',
+          month: '', year: '', excelMatch: 'No Match', excelRow: null, driveFileId: ''
+        });
+      }
+      renderAutomateRowsFlattened(detectedPapers);
+      setAutoStepState(3, 'done');
+    } else {
+      autoLog(`Step 3/5: Scanning every page for multiple papers using ${metaProvider}…`);
+      for (const [sourceName, cache] of cleanFilesCache.entries()) {
+        if (automateCancelRequested) throw new Error('Canceled.');
+        const doc = await pdfjsLib.getDocument({ data: cache.bytes }).promise;
+        autoLog(`Scanning ${sourceName} (${doc.numPages} pages)…`);
 
-      for (let p = 1; p <= doc.numPages; p++) {
-        const page = await doc.getPage(p);
-        const meta = await extractQuestionPaperFieldsLocalFromPage(page, doc);
-        
-        if (meta.is_first_page || p === 1) {
-          let finalMeta = meta;
-          if (metaProvider !== 'local') {
-            const b64 = await renderPdfPageToBase64(doc, p, 1.6, 0.8);
-            finalMeta = await extractQuestionPaperFields(b64, metaProvider, metaModel, apiKey);
+        for (let p = 1; p <= doc.numPages; p++) {
+          const page = await doc.getPage(p);
+          const meta = await extractQuestionPaperFieldsLocalFromPage(page, doc);
+          
+          if (meta.is_first_page || p === 1) {
+            let finalMeta = meta;
+            if (metaProvider !== 'local') {
+              const b64 = await renderPdfPageToBase64(doc, p, 1.6, 0.8);
+              finalMeta = await extractQuestionPaperFields(b64, metaProvider, metaModel, apiKey);
+            }
+
+            const paper = {
+              sourceFile: sourceName,
+              pageIndex: p,
+              school: finalMeta.school || meta.school || '',
+              dept: (finalMeta.departments || meta.departments || []).join(', '),
+              subjectCode: finalMeta.subject_code || meta.subject_code || '',
+              subject: finalMeta.subject || meta.subject || '',
+              month: finalMeta.month || meta.month || '',
+              year: finalMeta.year || meta.year || '',
+              excelMatch: 'No Match',
+              excelRow: null,
+              driveFileId: ''
+            };
+
+            const matchData = getMappedExcelRow(sourceName, paper.subject || paper.subjectCode);
+            if (matchData) {
+              paper.excelMatch = 'Matched';
+              paper.excelRow = matchData.row;
+            }
+
+            detectedPapers.push(paper);
+            renderAutomateRowsFlattened(detectedPapers);
           }
-
-          const paper = {
-            sourceFile: sourceName,
-            pageIndex: p,
-            school: finalMeta.school || meta.school || '',
-            dept: (finalMeta.departments || meta.departments || []).join(', '),
-            subjectCode: finalMeta.subject_code || meta.subject_code || '',
-            subject: finalMeta.subject || meta.subject || '',
-            month: finalMeta.month || meta.month || '',
-            year: finalMeta.year || meta.year || '',
-            excelMatch: 'No Match',
-            excelRow: null,
-            driveFileId: ''
-          };
-
-          const matchData = getMappedExcelRow(sourceName, paper.subject || paper.subjectCode);
-          if (matchData) {
-            paper.excelMatch = 'Matched';
-            paper.excelRow = matchData.row;
-          }
-
-          detectedPapers.push(paper);
-          renderAutomateRowsFlattened(detectedPapers);
         }
       }
+      setAutoStepState(3, 'done');
     }
     automateResults = detectedPapers;
-    setAutoStepState(3, 'done');
 
     setAutoStepState(4, 'active');
     autoLog('Step 4/5: Building folders and uploading…');
