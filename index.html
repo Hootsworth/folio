@@ -9,6 +9,7 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js"></script>
 <script src="https://accounts.google.com/gsi/client" async defer></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -257,6 +258,38 @@
         </div>
       </div>
 
+      <div class="section-label" style="margin-top:1rem"><span>Smart Mapping (Optional)</span></div>
+      <div class="auto-sub">Upload an Excel/CSV to auto-fill metadata and organize files into folders.</div>
+      <div class="field" style="margin-bottom: 0.75rem;">
+        <input type="file" id="auto-excel-input" accept=".xlsx, .xls, .csv" style="display:none" onchange="handleExcelUpload(this.files)">
+        <button class="btn-secondary" style="width:100%; border-style:dashed;" type="button" onclick="document.getElementById('auto-excel-input').click()">Upload Excel / CSV</button>
+      </div>
+      
+      <div id="excel-mapping-zone" style="display:none">
+        <div class="mapping-grid">
+          <div class="field">
+            <label class="field-label">Paper Title</label>
+            <select id="map-title" class="map-select"><option value="">-- Skip --</option></select>
+          </div>
+          <div class="field">
+            <label class="field-label">Subject Code</label>
+            <select id="map-code" class="map-select"><option value="">-- Skip --</option></select>
+          </div>
+          <div class="field">
+            <label class="field-label">Year</label>
+            <select id="map-year" class="map-select"><option value="">-- Skip --</option></select>
+          </div>
+          <div class="field">
+            <label class="field-label">Department</label>
+            <select id="map-dept" class="map-select"><option value="">-- Skip --</option></select>
+          </div>
+        </div>
+        <div class="toggle-row" style="margin-top: -0.5rem; margin-bottom: 1rem;">
+          <input type="checkbox" id="auto-folder-logic" checked>
+          <label for="auto-folder-logic">Auto-create Year/Dept/Subject subfolders</label>
+        </div>
+      </div>
+
       <div class="field" style="margin-bottom: 0.75rem;">
         <label class="field-label">Engine &amp; Model</label>
         <div class="field-row">
@@ -294,16 +327,17 @@
         <table class="auto-table">
           <thead>
             <tr>
-              <th>Source file</th>
-              <th>Cleaned file</th>
-              <th>Detected title</th>
-              <th>Total</th>
-              <th>Removed</th>
+              <th>Source PDF</th>
+              <th>Cleaned PDF</th>
+              <th>Excel Match</th>
+              <th>Paper Title</th>
+              <th>Pages</th>
+              <th>Rem</th>
               <th>Kept</th>
             </tr>
           </thead>
           <tbody id="auto-table-body">
-            <tr><td colspan="6" class="meta-empty">Run automation to populate this table.</td></tr>
+            <tr><td colspan="7" class="meta-empty">Run automation to populate this table.</td></tr>
           </tbody>
         </table>
       </div>

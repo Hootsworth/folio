@@ -22,6 +22,10 @@ let automateRunning = false;
 let automateResults = [];
 let automateCsvText = '';
 
+let excelData = [];
+let excelColumns = [];
+let excelMappings = { title: '', code: '', year: '', dept: '' };
+
 const MODELS = {
   anthropic: [
     { id: 'claude-opus-4-5', label: 'Claude Opus 4.5' },
@@ -1159,7 +1163,7 @@ function renderAutomateRows() {
   if (!body) return;
   body.innerHTML = '';
   if (!automateResults.length) {
-    body.innerHTML = '<tr><td colspan="6" class="meta-empty">Run automation to populate this table.</td></tr>';
+    body.innerHTML = '<tr><td colspan="7" class="meta-empty">Run automation to populate this table.</td></tr>';
     return;
   }
   automateResults.forEach(row => {
@@ -1167,6 +1171,7 @@ function renderAutomateRows() {
     tr.innerHTML = `
       <td>${row.sourceFile}</td>
       <td>${row.cleanedFile}</td>
+      <td><span class="match-badge ${row.excelMatch.toLowerCase().replace(' ', '-')}">${row.excelMatch}</span></td>
       <td>${row.title || 'Untitled'}</td>
       <td>${row.totalPages}</td>
       <td>${row.removed}</td>
@@ -1176,19 +1181,6 @@ function renderAutomateRows() {
   });
 }
 
-function buildAutomateCsv() {
-  const header = 'source_file,cleaned_file,title,total_pages,removed,kept,drive_file_id';
-  const rows = automateResults.map(r => [
-    r.sourceFile,
-    r.cleanedFile,
-    r.title || '',
-    r.totalPages,
-    r.removed,
-    r.kept,
-    r.driveFileId || ''
-  ].map(v => `"${String(v).replace(/"/g, '""')}"`).join(','));
-  return [header, ...rows].join('\n');
-}
 
 function downloadAutomateCsv() {
   if (!automateCsvText) return;
@@ -1386,19 +1378,11 @@ async function runAutomatePipeline() {
   const provider = document.getElementById('auto-provider-select').value;
   const model = document.getElementById('auto-model-select').value;
   const apiKey = document.getElementById('auto-api-key').value.trim() || document.getElementById('api-key').value.trim();
+  const useFolderLogic = document.getElementById('auto-folder-logic').checked;
 
-  if (!sourceFolderId) {
-    setAutoStatus('Provide source folder ID first.', 'err');
-    return;
-  }
-  if (!destinationFolderId) {
-    setAutoStatus('Provide destination folder ID first.', 'err');
-    return;
-  }
-  if (provider !== 'local' && !apiKey) {
-    setAutoStatus('Provide API key for automation.', 'err');
-    return;
-  }
+  if (!sourceFolderId) return setAutoStatus('Provide source folder ID.', 'err');
+  if (!destinationFolderId) return setAutoStatus('Provide destination folder ID.', 'err');
+  if (provider !== 'local' && !apiKey) return setAutoStatus('Provide API key.', 'err');
 
   automateRunning = true;
   automateCancelRequested = false;
@@ -1407,31 +1391,25 @@ async function runAutomatePipeline() {
   document.getElementById('auto-table-body').innerHTML = '<tr><td colspan="6" class="meta-empty">Pipeline running…</td></tr>';
   resetAutoSteps();
   document.getElementById('auto-log').innerHTML = '';
-  setAutoStatus('Pipeline started.');
   autoLog('Automation started.');
-
-  document.getElementById('progress-section').style.display = 'block';
-  document.getElementById('result-section').style.display = 'none';
 
   try {
     setAutoStepState(1, 'active');
     autoLog('Step 1/5: Reading source Drive folder…');
     const sourceFiles = await listPdfsInDriveFolder(sourceFolderId);
-    if (!sourceFiles.length) throw new Error('No PDF files found in source folder.');
-    autoLog(`Found ${sourceFiles.length} PDF file(s).`, 'ok');
+    if (!sourceFiles.length) throw new Error('No PDF files found.');
+    autoLog(`Found ${sourceFiles.length} file(s).`, 'ok');
     setAutoStepState(1, 'done');
 
     setAutoStepState(2, 'active');
-    autoLog('Step 2/5: Cleaning PDFs sequentially by removing empty pages…');
+    autoLog('Step 2/5: Cleaning PDFs sequentially…');
 
     for (let i = 0; i < sourceFiles.length; i++) {
-      if (automateCancelRequested) throw new Error('Automation canceled by user.');
+      if (automateCancelRequested) throw new Error('Canceled.');
 
       const f = sourceFiles[i];
-      autoLog(`Downloading source file ${i + 1}/${sourceFiles.length}: ${f.name}`);
+      autoLog(`Processing ${i + 1}/${sourceFiles.length}: ${f.name}`);
       const bytes = await downloadDriveFileBytes(f.id);
-
-      autoLog(`Cleaning ${f.name}…`);
       const cleaned = await processPdfBytes(f.name, bytes, provider, model, apiKey, i, sourceFiles.length);
 
       const row = {
@@ -1442,69 +1420,96 @@ async function runAutomatePipeline() {
         kept: cleaned.kept,
         cleanPdfBytes: cleaned.cleanPdfBytes,
         title: '',
+        excelMatch: 'No Match',
+        excelRow: null,
         driveFileId: ''
       };
       automateResults.push(row);
       renderAutomateRows();
-      autoLog(`Cleaned ${f.name}: kept ${cleaned.kept}, removed ${cleaned.removed}.`, 'ok');
     }
     setAutoStepState(2, 'done');
 
     setAutoStepState(3, 'active');
-    autoLog('Step 3/5: Extracting titles from cleaned papers…');
+    autoLog('Step 3/5: Extracting titles and matching with Excel…');
     for (let i = 0; i < automateResults.length; i++) {
-      if (automateCancelRequested) throw new Error('Automation canceled by user.');
+      if (automateCancelRequested) throw new Error('Canceled.');
       const row = automateResults[i];
-      autoLog(`Extracting title ${i + 1}/${automateResults.length}: ${row.cleanedFile}`);
       try {
         row.title = (await extractTitleFromPdfBytes(row.cleanPdfBytes, provider, model, apiKey)).trim();
-        autoLog(`Title detected: ${row.title || 'Untitled'}.`, 'ok');
-      } catch (err) {
-        row.title = '';
-        autoLog(`Title extraction fallback for ${row.cleanedFile}: ${err.message}`, 'err');
+        autoLog(`Title: ${row.title || 'Unknown'}`);
+      } catch (err) { autoLog(`Title error: ${err.message}`, 'err'); }
+      
+      const matchData = getMappedExcelRow(row.sourceFile, row.title);
+      if (matchData) {
+        row.excelMatch = 'Matched';
+        row.excelRow = matchData.row;
+        autoLog(`Matched ${row.sourceFile} to Excel row.`, 'ok');
       }
       renderAutomateRows();
     }
     setAutoStepState(3, 'done');
 
     setAutoStepState(4, 'active');
-    autoLog('Step 4/5: Building CSV output table…');
-    automateCsvText = buildAutomateCsv();
-    setAutoStepState(4, 'done');
-    autoLog('CSV ready for download.', 'ok');
-
-    setAutoStepState(5, 'active');
-    autoLog('Step 5/5: Uploading cleaned PDFs and CSV to destination folder…');
-    driveFolderId = destinationFolderId;
-
+    autoLog('Step 4/5: Building folders and uploading…');
     for (let i = 0; i < automateResults.length; i++) {
-      if (automateCancelRequested) throw new Error('Automation canceled by user.');
+      if (automateCancelRequested) throw new Error('Canceled.');
       const row = automateResults[i];
-      const uploaded = await uploadBytesToDrive(row.cleanPdfBytes, row.cleanedFile);
-      row.driveFileId = uploaded.id || '';
-      autoLog(`Uploaded ${row.cleanedFile} to destination folder.`, 'ok');
+      let targetFolderId = destinationFolderId;
+      
+      if (useFolderLogic && row.excelRow) {
+        const year = String(row.excelRow[document.getElementById('map-year').value] || 'Unknown-Year');
+        const dept = String(row.excelRow[document.getElementById('map-dept').value] || 'Unknown-Dept');
+        const code = String(row.excelRow[document.getElementById('map-code').value] || 'Unknown-Subject');
+        
+        const yearId = await getOrCreateSubfolder(destinationFolderId, year);
+        const deptId = await getOrCreateSubfolder(yearId, dept);
+        targetFolderId = await getOrCreateSubfolder(deptId, code);
+        
+        // Standardize filename
+        const cleanTitle = (row.title || row.sourceFile).replace(/[^a-zA-Z0-9]/g, '_').slice(0, 50);
+        row.cleanedFile = `${code}_${year}_${cleanTitle}.pdf`;
+      }
+
+      autoLog(`Uploading ${row.cleanedFile}…`);
+      const up = await uploadBytesToDriveSmart(row.cleanPdfBytes, row.cleanedFile, targetFolderId);
+      row.driveFileId = up.id;
       renderAutomateRows();
     }
+    setAutoStepState(4, 'done');
 
-    const csvBlob = new Blob([automateCsvText], { type: 'text/csv;charset=utf-8;' });
+    setAutoStepState(5, 'active');
+    autoLog('Step 5/5: Generating Audit Report…');
+    automateCsvText = buildAuditReport();
+    const csvBlob = new Blob([automateCsvText], { type: 'text/csv' });
     const csvBytes = new Uint8Array(await csvBlob.arrayBuffer());
-    await uploadBytesToDrive(csvBytes, 'folio_automated_titles.csv', 'text/csv');
+    await uploadBytesToDriveSmart(csvBytes, `audit_report_${new Date().getTime()}.csv`, destinationFolderId, 'text/csv');
     setAutoStepState(5, 'done');
-    autoLog('Uploaded CSV table to destination folder.', 'ok');
 
-    setAutoStatus(`Automation complete for ${automateResults.length} paper(s).`, 'ok');
-    autoLog('Pipeline complete. Downloads are ready below.', 'ok');
+    setAutoStatus('Automation complete.', 'ok');
+    autoLog('Pipeline complete. Audit report uploaded.', 'ok');
   } catch (err) {
-    autoLog('Pipeline failed: ' + err.message, 'err');
-    setAutoStatus('Pipeline failed: ' + err.message, 'err');
-    const active = Array.from(document.querySelectorAll('#auto-steps-list li')).find(li => li.classList.contains('active'));
-    if (active) {
-      active.classList.remove('active');
-      active.classList.add('fail');
-    }
-  } finally {
-    automateRunning = false;
-  }
+    autoLog(`Failed: ${err.message}`, 'err');
+    setAutoStatus(`Failed: ${err.message}`, 'err');
+  } finally { automateRunning = false; }
+}
+
+function buildAuditReport() {
+  const titleCol = document.getElementById('map-title').value;
+  const header = 'source_file,cleaned_file,pages_removed,pages_kept,detected_title,excel_match,excel_row_data,drive_file_id';
+  const rows = automateResults.map(r => {
+    const excelJson = r.excelRow ? JSON.stringify(r.excelRow).replace(/"/g, '""') : '';
+    return [
+      r.sourceFile,
+      r.cleanedFile,
+      r.removed,
+      r.kept,
+      r.title || '',
+      r.excelMatch,
+      `"${excelJson}"`,
+      r.driveFileId
+    ].map(v => `"${String(v).replace(/"/g, '""')}"`).join(',');
+  });
+  return [header, ...rows].join('\n');
 }
 
 async function uploadBytesToDrive(bytes, outputName, mimeType = 'application/pdf') {
@@ -1749,6 +1754,150 @@ function downloadProcessingReport() {
 async function uploadLatestToDrive() {
   if (!latestResult) return;
   await uploadResultToDrive(latestResult);
+}
+
+// EXCEL INGESTION
+function handleExcelUpload(files) {
+  if (!files || !files.length) return;
+  const file = files[0];
+  const reader = new FileReader();
+  reader.onload = (e) => {
+    const data = new Uint8Array(e.target.result);
+    const workbook = XLSX.read(data, { type: 'array' });
+    const firstSheetName = workbook.SheetNames[0];
+    const worksheet = workbook.Sheets[firstSheetName];
+    excelData = XLSX.utils.sheet_to_json(worksheet);
+    
+    if (excelData.length > 0) {
+      excelColumns = Object.keys(excelData[0]);
+      populateMappingSelects();
+      document.getElementById('excel-mapping-zone').style.display = 'block';
+      autoLog(`Excel loaded: ${excelData.length} rows found.`, 'ok');
+    }
+  };
+  reader.readAsArrayBuffer(file);
+}
+
+function populateMappingSelects() {
+  ['map-title', 'map-code', 'map-year', 'map-dept'].forEach(id => {
+    const sel = document.getElementById(id);
+    sel.innerHTML = '<option value="">-- Skip --</option>';
+    excelColumns.forEach(col => {
+      const opt = document.createElement('option');
+      opt.value = col;
+      opt.textContent = col;
+      
+      // Auto-matching logic for common names
+      const low = col.toLowerCase();
+      if (id === 'map-title' && (low.includes('title') || low.includes('paper') || low.includes('subject'))) opt.selected = true;
+      if (id === 'map-code' && (low.includes('code'))) opt.selected = true;
+      if (id === 'map-year' && (low.includes('year'))) opt.selected = true;
+      if (id === 'map-dept' && (low.includes('dept') || low.includes('department'))) opt.selected = true;
+      
+      sel.appendChild(opt);
+    });
+  });
+}
+
+function getMappedExcelRow(fileName, detectedTitle) {
+  if (!excelData.length) return null;
+  
+  const titleCol = document.getElementById('map-title').value;
+  const codeCol = document.getElementById('map-code').value;
+  const yearCol = document.getElementById('map-year').value;
+  const deptCol = document.getElementById('map-dept').value;
+
+  let bestMatch = null;
+  let bestScore = -1;
+
+  const cleanFile = fileName.toLowerCase().replace(/\.pdf$/, '');
+  const cleanDetected = (detectedTitle || '').toLowerCase();
+
+  excelData.forEach(row => {
+    let score = 0;
+    const rowTitle = String(row[titleCol] || '').toLowerCase();
+    const rowCode = String(row[codeCol] || '').toLowerCase();
+    
+    // Exact match on filename
+    if (rowTitle && cleanFile.includes(rowTitle)) score += 10;
+    if (rowCode && cleanFile.includes(rowCode)) score += 10;
+    
+    // Fuzzy match on detected title
+    if (cleanDetected && rowTitle) {
+      if (cleanDetected.includes(rowTitle) || rowTitle.includes(cleanDetected)) score += 5;
+      // Simple word overlap
+      const detectedWords = new Set(cleanDetected.split(/\W+/));
+      const rowWords = rowTitle.split(/\W+/);
+      let overlap = 0;
+      rowWords.forEach(w => { if (w.length > 3 && detectedWords.has(w)) overlap++; });
+      score += overlap;
+    }
+
+    if (score > bestScore) {
+      bestScore = score;
+      bestMatch = row;
+    }
+  });
+
+  // Threshold
+  if (bestScore > 3) return { row: bestMatch, score: bestScore };
+  return null;
+}
+
+// FOLDER INTELLIGENCE
+async function getOrCreateSubfolder(parentFolderId, folderName) {
+  if (!folderName) return parentFolderId;
+  
+  if (!googleAccessToken) await requestGoogleToken('');
+  
+  const q = `'${parentFolderId}' in parents and name='${folderName.replace(/'/g, "\\'")}' and mimeType='application/vnd.google-apps.folder' and trashed=false`;
+  const url = `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}&fields=files(id,name)`;
+  
+  const res = await fetch(url, { headers: { 'Authorization': 'Bearer ' + googleAccessToken } });
+  const data = await res.json();
+  
+  if (data.files && data.files.length > 0) {
+    return data.files[0].id;
+  }
+  
+  // Create if not found
+  const createRes = await fetch('https://www.googleapis.com/drive/v3/files', {
+    method: 'POST',
+    headers: {
+      'Authorization': 'Bearer ' + googleAccessToken,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      name: folderName,
+      mimeType: 'application/vnd.google-apps.folder',
+      parents: [parentFolderId]
+    })
+  });
+  const created = await createRes.json();
+  return created.id;
+}
+
+async function uploadBytesToDriveSmart(bytes, outputName, folderId, mimeType = 'application/pdf') {
+  if (!googleAccessToken) await requestGoogleToken('');
+
+  const metadata = { name: outputName, mimeType, parents: [folderId] };
+  const boundary = 'folio_' + Math.random().toString(16).slice(2);
+  const pre = `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(metadata)}\r\n`;
+  const mid = `--${boundary}\r\nContent-Type: ${mimeType}\r\n\r\n`;
+  const end = `\r\n--${boundary}--`;
+
+  const body = new Blob([pre, mid, bytes, end], { type: 'multipart/related; boundary=' + boundary });
+
+  const res = await fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,name', {
+    method: 'POST',
+    headers: {
+      'Authorization': 'Bearer ' + googleAccessToken,
+      'Content-Type': `multipart/related; boundary=${boundary}`
+    },
+    body
+  });
+
+  return res.json();
 }
 
 // Initialize components
