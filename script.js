@@ -434,13 +434,47 @@ async function getSourceBytes(source) {
   throw new Error('Invalid metadata source bytes.');
 }
 
-async function renderPdfPageToBase64(doc, pageNumber, scale = 1.6, quality = 0.8) {
+async function renderPdfPageToBase64(doc, pageNumber, scale = 1.6, quality = 0.8, enhance = false) {
   const page = await doc.getPage(pageNumber);
   const viewport = page.getViewport({ scale });
   const canvas = document.createElement('canvas');
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
   canvas.width = viewport.width;
   canvas.height = viewport.height;
-  await page.render({ canvasContext: canvas.getContext('2d'), viewport }).promise;
+  
+  await page.render({ canvasContext: ctx, viewport }).promise;
+
+  if (enhance) {
+    // Advanced Image Enhancement for OCR/Vision
+    const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    const data = imageData.data;
+    
+    // 1. Grayscale & Contrast Boost
+    for (let i = 0; i < data.length; i += 4) {
+      const avg = (data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114);
+      
+      // Histogram stretching / Contrast boost
+      // We map [30, 220] to [0, 255] to remove gray haze and faint noise
+      let v = (avg - 30) * (255 / 190);
+      v = Math.max(0, Math.min(255, v));
+      
+      data[i] = v;     // R
+      data[i + 1] = v; // G
+      data[i + 2] = v; // B
+    }
+    ctx.putImageData(imageData, 0, 0);
+    
+    // 2. Subtle sharpening using a convolution kernel (Laplacian)
+    // This helps the OCR engine see edges more clearly
+    const weight = 0.15;
+    ctx.globalAlpha = weight;
+    ctx.drawImage(canvas, -1, 0);
+    ctx.drawImage(canvas, 1, 0);
+    ctx.drawImage(canvas, 0, -1);
+    ctx.drawImage(canvas, 0, 1);
+    ctx.globalAlpha = 1.0;
+  }
+
   return canvas.toDataURL('image/jpeg', quality).split(',')[1];
 }
 
@@ -698,17 +732,16 @@ async function extractQuestionPaperFieldsLocalFromPage(page, pdfDoc) {
   let lines = await getPageTextLines(page);
   let text = lines.join(' \n ');
   
-  // If we are using an LLM, we still use a quick Local OCR for *detection* 
-  // on scanned pages to avoid sending every single middle page to the LLM.
+  // OCR Fallback if text layer is sparse
+  // We use "Super-Resolution" (3.5x) and Enhancement for detection to find even faint text
   if (text.trim().length < 50 && pdfDoc) {
     const pageNum = page.pageNumber;
-    const b64 = await renderPdfPageToBase64(pdfDoc, pageNum, 1.2, 0.7); // Faster, lower res for detection
+    const b64 = await renderPdfPageToBase64(pdfDoc, pageNum, 3.5, 0.95, true);
     const ocrResult = await Tesseract.recognize('data:image/jpeg;base64,' + b64, 'eng');
     text = ocrResult.data.text;
     lines = text.split('\n');
-    // Log as a "pre-scan" so the user knows LLM is still coming
     if (metaProvider === 'local') {
-      autoLog(`Local OCR performed on page ${pageNum}.`, 'ok');
+      autoLog(`Enhanced Super-OCR performed on page ${pageNum} for detection.`, 'ok');
     }
   }
 
@@ -1554,8 +1587,9 @@ async function runAutomatePipeline() {
           // If no text layer and LLM is active, we check the page with LLM if it's the first page 
           // or if local heuristics suggest a potential start.
           if (isLikelyStart) {
-            autoLog(`Page ${p}: Potential paper detected. Calling ${metaProvider} (AI Extraction)…`);
-            const b64 = await renderPdfPageToBase64(doc, p, 2.0, 0.9); // High quality for LLM
+            autoLog(`Page ${p}: Paper detected. Re-scanning with High-Res AI Vision…`);
+            // Render at 2.5x with enhancement for the AI to see clearly
+            const b64 = await renderPdfPageToBase64(doc, p, 2.5, 0.92, true);
             try {
               const finalMeta = await extractQuestionPaperFields(b64, metaProvider, metaModel, apiKey);
               
