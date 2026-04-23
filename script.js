@@ -1429,10 +1429,12 @@ async function runAutomatePipeline() {
   const metaProvider = document.getElementById('auto-meta-provider').value;
   const metaModel = document.getElementById('auto-meta-model').value;
   
-  const apiKey = document.getElementById('auto-api-key').value.trim();
+  const apiKey = document.getElementById('auto-api-key').value.trim() || document.getElementById('api-key').value.trim();
   const useFolderLogic = document.getElementById('auto-folder-logic').checked;
   const skipClean = document.getElementById('auto-skip-clean').checked;
   const skipMeta = document.getElementById('auto-skip-meta').checked;
+
+  console.log('Automate Start:', { skipClean, skipMeta, cleanProvider, metaProvider });
 
   if (!sourceFolderId) return setAutoStatus('Provide source folder ID.', 'err');
   if (!destinationFolderId) return setAutoStatus('Provide destination folder ID.', 'err');
@@ -1461,20 +1463,21 @@ async function runAutomatePipeline() {
     const cleanFilesCache = new Map(); // Store [sourceName -> {bytes, removed, kept}]
 
     if (skipClean) {
-      autoLog('Step 2/5: Skipping Cleaning (Phase 1) as requested.');
+      autoLog('Phase 1 (Cleaning) is SKIPPED.', 'ok');
       for (let i = 0; i < sourceFiles.length; i++) {
         const f = sourceFiles[i];
-        const bytes = await downloadDriveFileBytes(f.id);
+        // We don't download yet if we also skip meta, to make it faster
         cleanFilesCache.set(f.name, {
-          bytes: bytes,
+          id: f.id,
+          bytes: null, 
           removed: 0,
-          kept: 'All (Skipped Cleaning)',
+          kept: 'Skipped',
           totalPages: '?'
         });
       }
       setAutoStepState(2, 'done');
     } else {
-      autoLog(`Step 2/5: Cleaning PDFs using ${cleanProvider}…`);
+      autoLog(`Phase 1 (Cleaning) active using ${cleanProvider}…`);
       for (let i = 0; i < sourceFiles.length; i++) {
         if (automateCancelRequested) throw new Error('Canceled.');
         const f = sourceFiles[i];
@@ -1496,7 +1499,7 @@ async function runAutomatePipeline() {
     const detectedPapers = [];
 
     if (skipMeta) {
-      autoLog('Step 3/5: Skipping Metadata Extraction (Phase 2) as requested.');
+      autoLog('Phase 2 (Metadata) is SKIPPED.', 'ok');
       for (const sourceName of cleanFilesCache.keys()) {
         detectedPapers.push({
           sourceFile: sourceName,
@@ -1508,11 +1511,18 @@ async function runAutomatePipeline() {
       renderAutomateRowsFlattened(detectedPapers);
       setAutoStepState(3, 'done');
     } else {
-      autoLog(`Step 3/5: Scanning every page for multiple papers using ${metaProvider}…`);
+      autoLog(`Phase 2 (Metadata) active using ${metaProvider}…`);
       for (const [sourceName, cache] of cleanFilesCache.entries()) {
         if (automateCancelRequested) throw new Error('Canceled.');
+        
+        // Download now if it was skipped in Step 2
+        if (!cache.bytes) {
+          autoLog(`Downloading ${sourceName}…`);
+          cache.bytes = await downloadDriveFileBytes(cache.id);
+        }
+
         const doc = await pdfjsLib.getDocument({ data: cache.bytes }).promise;
-        autoLog(`Scanning ${sourceName} (${doc.numPages} pages)…`);
+        autoLog(`Scanning every page of ${sourceName} (${doc.numPages})…`);
 
         for (let p = 1; p <= doc.numPages; p++) {
           const page = await doc.getPage(p);
@@ -1568,6 +1578,11 @@ async function runAutomatePipeline() {
       if (automateCancelRequested) throw new Error('Canceled.');
       
       const cache = cleanFilesCache.get(sourceName);
+      if (!cache.bytes) {
+        autoLog(`Downloading ${sourceName} for upload…`);
+        cache.bytes = await downloadDriveFileBytes(cache.id);
+      }
+      
       let targetFolderId = destinationFolderId;
       
       // If folder logic is ON, we use the first paper's metadata for the folder
