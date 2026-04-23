@@ -477,7 +477,18 @@ function normalizeMetadata(obj, sourceFile) {
 }
 
 async function extractQuestionPaperFields(b64, provider, model, apiKey) {
-  const prompt = "Decide if this page is the FIRST PAGE of a question paper/exam paper. Indicators include school/institute name, department/program, subject code, subject name, exam month/year, semester, instructions, time, max marks. Return ONLY JSON with keys: is_first_page (boolean), school, departments (array of strings), semester, subject_code, subject, month, year, confidence (number 0-1). If not first page, return is_first_page false and empty fields.";
+  const prompt = `Identify if this image is the FIRST PAGE of a question paper/exam paper.
+If it is, extract:
+1. School/University Name (Full)
+2. Departments/Faculty (Array of strings)
+3. Semester (e.g., "1", "VI", "Autumn")
+4. Subject Code (e.g., "CS101", "ME-202")
+5. Subject Title (Full Name)
+6. Month of Exam
+7. Year of Exam (4 digits)
+
+Return ONLY a JSON object with these keys: is_first_page (boolean), school, departments (array), semester, subject_code, subject, month, year, confidence (0-1).
+If it is NOT a first page (e.g., a middle page of an exam), set is_first_page to false and return empty strings for the rest.`;
 
   async function openAiCompatibleMeta(endpoint, authHeader, tokenField, maxTokens) {
     const body = {
@@ -687,14 +698,18 @@ async function extractQuestionPaperFieldsLocalFromPage(page, pdfDoc) {
   let lines = await getPageTextLines(page);
   let text = lines.join(' \n ');
   
-  // OCR Fallback if text layer is sparse
+  // If we are using an LLM, we still use a quick Local OCR for *detection* 
+  // on scanned pages to avoid sending every single middle page to the LLM.
   if (text.trim().length < 50 && pdfDoc) {
     const pageNum = page.pageNumber;
-    const b64 = await renderPdfPageToBase64(pdfDoc, pageNum, 2.0, 0.9);
+    const b64 = await renderPdfPageToBase64(pdfDoc, pageNum, 1.2, 0.7); // Faster, lower res for detection
     const ocrResult = await Tesseract.recognize('data:image/jpeg;base64,' + b64, 'eng');
     text = ocrResult.data.text;
     lines = text.split('\n');
-    autoLog(`Local OCR performed on page ${pageNum}.`, 'ok');
+    // Log as a "pre-scan" so the user knows LLM is still coming
+    if (metaProvider === 'local') {
+      autoLog(`Local OCR performed on page ${pageNum}.`, 'ok');
+    }
   }
 
   return extractPaperMetadataLocal(text, lines);
@@ -1531,38 +1546,58 @@ async function runAutomatePipeline() {
 
         for (let p = 1; p <= doc.numPages; p++) {
           const page = await doc.getPage(p);
-          const meta = await extractQuestionPaperFieldsLocalFromPage(page, doc);
           
-          if (meta.is_first_page || p === 1) {
-            let finalMeta = meta;
-            if (metaProvider !== 'local') {
-              const b64 = await renderPdfPageToBase64(doc, p, 1.6, 0.8);
-              finalMeta = await extractQuestionPaperFields(b64, metaProvider, metaModel, apiKey);
+          // Fast heuristic pre-check using text layer (if available)
+          const metaLocal = await extractQuestionPaperFieldsLocalFromPage(page, doc);
+          let isLikelyStart = metaLocal.is_first_page || p === 1;
+          
+          // If no text layer and LLM is active, we check the page with LLM if it's the first page 
+          // or if local heuristics suggest a potential start.
+          if (isLikelyStart) {
+            autoLog(`Page ${p}: Potential paper detected. Calling ${metaProvider} (AI Extraction)…`);
+            const b64 = await renderPdfPageToBase64(doc, p, 2.0, 0.9); // High quality for LLM
+            try {
+              const finalMeta = await extractQuestionPaperFields(b64, metaProvider, metaModel, apiKey);
+              
+              if (finalMeta.is_first_page || p === 1) {
+                const paper = {
+                  sourceFile: sourceName,
+                  pageIndex: p,
+                  school: finalMeta.school || metaLocal.school || '',
+                  semester: finalMeta.semester || metaLocal.semester || '',
+                  dept: (finalMeta.departments || metaLocal.departments || []).join(', '),
+                  subjectCode: finalMeta.subject_code || metaLocal.subject_code || '',
+                  subject: finalMeta.subject || metaLocal.subject || '',
+                  month: finalMeta.month || metaLocal.month || '',
+                  year: finalMeta.year || metaLocal.year || '',
+                  excelMatch: 'No Match',
+                  excelRow: null,
+                  driveFileId: ''
+                };
+
+                const matchData = getMappedExcelRow(sourceName, paper.subject || paper.subjectCode);
+                if (matchData) {
+                  paper.excelMatch = 'Matched';
+                  paper.excelRow = matchData.row;
+                }
+
+                detectedPapers.push(paper);
+                autoLog(`LLM extracted: ${paper.subjectCode || 'Paper'}`, 'ok');
+                renderAutomateRowsFlattened(detectedPapers);
+              }
+            } catch (llmErr) {
+              autoLog(`LLM Error on p.${p}: ${llmErr.message}. Falling back to local.`, 'err');
+              // Fallback to local data if LLM fails
+              detectedPapers.push({
+                sourceFile: sourceName,
+                pageIndex: p,
+                ...metaLocal,
+                dept: (metaLocal.departments || []).join(', '),
+                subjectCode: metaLocal.subject_code,
+                excelMatch: 'No Match', excelRow: null, driveFileId: ''
+              });
+              renderAutomateRowsFlattened(detectedPapers);
             }
-
-            const paper = {
-              sourceFile: sourceName,
-              pageIndex: p,
-              school: finalMeta.school || meta.school || '',
-              semester: finalMeta.semester || meta.semester || '',
-              dept: (finalMeta.departments || meta.departments || []).join(', '),
-              subjectCode: finalMeta.subject_code || meta.subject_code || '',
-              subject: finalMeta.subject || meta.subject || '',
-              month: finalMeta.month || meta.month || '',
-              year: finalMeta.year || meta.year || '',
-              excelMatch: 'No Match',
-              excelRow: null,
-              driveFileId: ''
-            };
-
-            const matchData = getMappedExcelRow(sourceName, paper.subject || paper.subjectCode);
-            if (matchData) {
-              paper.excelMatch = 'Matched';
-              paper.excelRow = matchData.row;
-            }
-
-            detectedPapers.push(paper);
-            renderAutomateRowsFlattened(detectedPapers);
           }
         }
       }
