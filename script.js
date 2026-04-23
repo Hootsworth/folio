@@ -96,32 +96,45 @@ function onProviderChange() {
   document.getElementById('api-key').disabled = p === 'local';
 }
 
-function onAutoProviderChange() {
-  const p = document.getElementById('auto-provider-select').value;
-  const ms = document.getElementById('auto-model-select');
-  ms.innerHTML = '';
-  MODELS[p].forEach(m => {
-    const o = document.createElement('option');
-    o.value = m.id;
-    o.textContent = m.label;
-    ms.appendChild(o);
+function onAutoProviderChange(phase) {
+  const pSel = document.getElementById(`auto-${phase}-provider`);
+  const mSel = document.getElementById(`auto-${phase}-model`);
+  if (!pSel || !mSel) return;
+  
+  const provider = pSel.value;
+  mSel.innerHTML = '';
+  
+  if (provider === 'local') {
+    const opt = document.createElement('option');
+    opt.value = 'local-v1';
+    opt.textContent = (phase === 'clean') ? 'Local Detector' : 'Local NLP + OCR';
+    mSel.appendChild(opt);
+    return;
+  }
+  
+  const models = MODELS[provider] || [];
+  models.forEach(m => {
+    const opt = document.createElement('option');
+    opt.value = m.id;
+    opt.textContent = m.label;
+    mSel.appendChild(opt);
   });
-  document.getElementById('auto-api-key').placeholder = PLACEHOLDERS[p];
-  document.getElementById('auto-api-key').disabled = p === 'local';
 }
 
 function initAutomateProviderSelects() {
-  const pSel = document.getElementById('auto-provider-select');
-  if (!pSel) return;
-  pSel.innerHTML = '';
-  Object.keys(MODELS).forEach(key => {
-    const op = document.createElement('option');
-    op.value = key;
-    op.textContent = key.charAt(0).toUpperCase() + key.slice(1);
-    pSel.appendChild(op);
+  ['clean', 'meta'].forEach(phase => {
+    const pSel = document.getElementById(`auto-${phase}-provider`);
+    if (!pSel) return;
+    pSel.innerHTML = '';
+    Object.keys(MODELS).forEach(key => {
+      const op = document.createElement('option');
+      op.value = key;
+      op.textContent = key.charAt(0).toUpperCase() + key.slice(1);
+      pSel.appendChild(op);
+    });
+    pSel.value = 'openai';
+    onAutoProviderChange(phase);
   });
-  pSel.value = 'openai';
-  onAutoProviderChange();
 }
 
 function setAutoStatus(text, state) {
@@ -1410,20 +1423,26 @@ async function processPdfBytes(fileName, bytes, provider, model, apiKey, fileInd
 async function runAutomatePipeline() {
   const sourceFolderId = document.getElementById('auto-source-folder-id').value.trim();
   const destinationFolderId = getActiveDriveFolderId();
-  const provider = document.getElementById('auto-provider-select').value;
-  const model = document.getElementById('auto-model-select').value;
-  const apiKey = document.getElementById('auto-api-key').value.trim() || document.getElementById('api-key').value.trim();
+  
+  const cleanProvider = document.getElementById('auto-clean-provider').value;
+  const cleanModel = document.getElementById('auto-clean-model').value;
+  const metaProvider = document.getElementById('auto-meta-provider').value;
+  const metaModel = document.getElementById('auto-meta-model').value;
+  
+  const apiKey = document.getElementById('auto-api-key').value.trim();
   const useFolderLogic = document.getElementById('auto-folder-logic').checked;
 
   if (!sourceFolderId) return setAutoStatus('Provide source folder ID.', 'err');
   if (!destinationFolderId) return setAutoStatus('Provide destination folder ID.', 'err');
-  if (provider !== 'local' && !apiKey) return setAutoStatus('Provide API key.', 'err');
+  
+  const needsKey = (cleanProvider !== 'local' || metaProvider !== 'local');
+  if (needsKey && !apiKey) return setAutoStatus('Provide API key for LLM phases.', 'err');
 
   automateRunning = true;
   automateCancelRequested = false;
   automateResults = [];
   automateCsvText = '';
-  document.getElementById('auto-table-body').innerHTML = '<tr><td colspan="6" class="meta-empty">Pipeline running…</td></tr>';
+  document.getElementById('auto-table-body').innerHTML = '<tr><td colspan="7" class="meta-empty">Pipeline running…</td></tr>';
   resetAutoSteps();
   document.getElementById('auto-log').innerHTML = '';
   autoLog('Automation started.');
@@ -1437,7 +1456,7 @@ async function runAutomatePipeline() {
     setAutoStepState(1, 'done');
 
     setAutoStepState(2, 'active');
-    autoLog('Step 2/5: Cleaning PDFs sequentially…');
+    autoLog(`Step 2/5: Cleaning PDFs using ${cleanProvider}…`);
 
     for (let i = 0; i < sourceFiles.length; i++) {
       if (automateCancelRequested) throw new Error('Canceled.');
@@ -1445,7 +1464,7 @@ async function runAutomatePipeline() {
       const f = sourceFiles[i];
       autoLog(`Processing ${i + 1}/${sourceFiles.length}: ${f.name}`);
       const bytes = await downloadDriveFileBytes(f.id);
-      const cleaned = await processPdfBytes(f.name, bytes, provider, model, apiKey, i, sourceFiles.length);
+      const cleaned = await processPdfBytes(f.name, bytes, cleanProvider, cleanModel, apiKey, i, sourceFiles.length);
 
       const row = {
         sourceFile: f.name,
@@ -1465,14 +1484,14 @@ async function runAutomatePipeline() {
     setAutoStepState(2, 'done');
 
     setAutoStepState(3, 'active');
-    autoLog('Step 3/5: Extracting titles and matching with Excel…');
+    autoLog(`Step 3/5: Extracting metadata using ${metaProvider}…`);
     for (let i = 0; i < automateResults.length; i++) {
       if (automateCancelRequested) throw new Error('Canceled.');
       const row = automateResults[i];
       try {
-        row.title = (await extractTitleFromPdfBytes(row.cleanPdfBytes, provider, model, apiKey)).trim();
-        autoLog(`Title: ${row.title || 'Unknown'}`);
-      } catch (err) { autoLog(`Title error: ${err.message}`, 'err'); }
+        row.title = (await extractTitleFromPdfBytes(row.cleanPdfBytes, metaProvider, metaModel, apiKey)).trim();
+        autoLog(`Metadata: ${row.title || 'Unknown'}`);
+      } catch (err) { autoLog(`Metadata error: ${err.message}`, 'err'); }
       
       const matchData = getMappedExcelRow(row.sourceFile, row.title);
       if (matchData) {
@@ -1943,5 +1962,6 @@ function extractEntitiesLocal(text, lines) {
 // Initialize components
 document.addEventListener('DOMContentLoaded', () => {
   onProviderChange();
-  initAutomateProviderSelects();
+  onAutoProviderChange('clean');
+  onAutoProviderChange('meta');
 });

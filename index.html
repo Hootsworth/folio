@@ -292,16 +292,40 @@
         </div>
       </div>
 
-      <div class="field" style="margin-bottom: 0.75rem;">
-        <label class="field-label">Engine &amp; Model</label>
-        <div class="field-row">
-          <select id="auto-provider-select" onchange="onAutoProviderChange()"></select>
-          <select id="auto-model-select"></select>
+      <div class="auto-phases">
+        <div class="field" style="margin-bottom: 1.25rem;">
+          <div class="field-label" style="margin-bottom: 0.5rem; color: var(--accent); font-weight: 500;">Phase 1: Page Cleaning (Vision)</div>
+          <div class="field-row">
+            <select id="auto-clean-provider" onchange="onAutoProviderChange('clean')">
+              <option value="local">Local (Heuristic - Free)</option>
+              <option value="openai">OpenAI (Vision)</option>
+              <option value="anthropic" selected>Anthropic (Vision)</option>
+              <option value="gemini">Google Gemini (Vision)</option>
+              <option value="groq">Groq (Vision)</option>
+              <option value="openrouter">OpenRouter</option>
+            </select>
+            <select id="auto-clean-model"></select>
+          </div>
+        </div>
+
+        <div class="field" style="margin-bottom: 1.25rem;">
+          <div class="field-label" style="margin-bottom: 0.5rem; color: var(--accent); font-weight: 500;">Phase 2: Metadata Extraction (Intelligence)</div>
+          <div class="field-row">
+            <select id="auto-meta-provider" onchange="onAutoProviderChange('meta')">
+              <option value="local" selected>Local (NLP + OCR - Free)</option>
+              <option value="openai">OpenAI (Vision)</option>
+              <option value="anthropic">Anthropic (Vision)</option>
+              <option value="gemini">Google Gemini (Vision)</option>
+              <option value="groq">Groq (Vision)</option>
+              <option value="openrouter">OpenRouter</option>
+            </select>
+            <select id="auto-meta-model"></select>
+          </div>
         </div>
       </div>
 
       <div class="field" style="margin-bottom: 0.75rem;">
-        <label class="field-label">API Key (not required for Local mode)</label>
+        <label class="field-label">Common API Key (Anthropic/OpenAI/etc.)</label>
         <input type="password" id="auto-api-key" placeholder="sk-..." autocomplete="off" spellcheck="false">
       </div>
 
